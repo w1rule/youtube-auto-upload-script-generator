@@ -18,12 +18,14 @@ import os
 import sys
 import glob
 import pickle
+import shutil
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 # ── CONFIG (set by generator) ──────────────────────────────────────────────
 YOUTUBE_CLIENT_SECRETS = "CLIENT_SECRETS_PATH_PLACEHOLDER"
+DEFAULT_SAVE_DEST = "DEFAULT_SAVE_DEST_PLACEHOLDER"   # "" means no default
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_token.pickle")
 VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v"]
 
@@ -216,7 +218,39 @@ class VideoInfoDialog(tk.Toplevel):
         # Privacy toggle
         self._label(body, "VISIBILITY")
         self.privacy_toggle = PrivacyToggle(body)
-        self.privacy_toggle.pack(fill="x", pady=(0, 0))
+        self.privacy_toggle.pack(fill="x", pady=(0, 16))
+
+        # Save destination
+        self._label(body, "MOVE VIDEO TO (optional)")
+        save_row = tk.Frame(body, bg=BG)
+        save_row.pack(fill="x", pady=(0, 0))
+
+        self._save_dest = tk.StringVar(value=DEFAULT_SAVE_DEST)
+        self.save_label = tk.Label(
+            save_row, textvariable=self._save_dest,
+            bg=ENTRY, fg=(FG if DEFAULT_SAVE_DEST else MUTED), font=("Helvetica", 10),
+            anchor="w", padx=10, relief="flat",
+            highlightthickness=1, highlightbackground=BORDER
+        )
+        self.save_label.pack(side="left", fill="x", expand=True, ipady=7)
+
+        tk.Button(
+            save_row, text="Browse…", bg=CARD, fg=FG,
+            font=("Helvetica", 10, "bold"), relief="flat",
+            padx=14, cursor="hand2", activebackground=BORDER,
+            activeforeground=FG, command=self._browse_save_dest
+        ).pack(side="left", padx=(8, 0), ipady=7)
+
+        tk.Button(
+            save_row, text="✕", bg=CARD, fg=MUTED,
+            font=("Helvetica", 10), relief="flat",
+            padx=8, cursor="hand2", activebackground=BORDER,
+            activeforeground=FG,
+            command=lambda: [
+                self._save_dest.set(DEFAULT_SAVE_DEST),
+                self.save_label.configure(fg=(FG if DEFAULT_SAVE_DEST else MUTED))
+            ]
+        ).pack(side="left", padx=(4, 0), ipady=7)
 
         # Divider
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
@@ -248,18 +282,30 @@ class VideoInfoDialog(tk.Toplevel):
             self._thumb_path = path
             self.thumb_label.configure(text=os.path.basename(path), fg=FG)
 
+    def _browse_save_dest(self):
+        folder = filedialog.askdirectory(title="Choose folder to save a copy of the video")
+        if folder:
+            self._save_dest.set(folder)
+            self.save_label.configure(fg=FG)
+
     def _confirm(self):
         thumb = self._thumb_path
         if thumb and not os.path.exists(thumb):
             messagebox.showwarning("Thumbnail not found",
                 f"Could not find:\n{thumb}\nProceeding without thumbnail.")
             thumb = None
+        save_dest = self._save_dest.get().strip() or None
+        if save_dest and not os.path.isdir(save_dest):
+            messagebox.showwarning("Folder not found",
+                f"Save destination not found:\n{save_dest}\nThe copy will be skipped.")
+            save_dest = None
         self.result = {
             "title":       self.title_str,
             "description": self.desc_box.get("1.0", "end").strip(),
             "thumbnail":   thumb,
             "privacy":     self.privacy_toggle.get(),
             "filepath":    self.video_path,
+            "save_dest":   save_dest,
         }
         self.destroy()
 
@@ -416,6 +462,22 @@ class UploadWindow(tk.Tk):
             except Exception as e:
                 self._log(f"   ⚠ Thumbnail failed: {e}")
 
+        if info.get("save_dest"):
+            try:
+                dest_folder = info["save_dest"]
+                filename = os.path.basename(info["filepath"])
+                dest_path = os.path.join(dest_folder, filename)
+                # Avoid overwriting an existing file by appending a counter
+                base, ext = os.path.splitext(filename)
+                counter = 1
+                while os.path.exists(dest_path):
+                    dest_path = os.path.join(dest_folder, f"{base} ({counter}){ext}")
+                    counter += 1
+                shutil.move(info["filepath"], dest_path)
+                self._log(f"   ✓ Moved → {dest_path}")
+            except Exception as e:
+                self._log(f"   ⚠ Save copy failed: {e}")
+
         return video_id
 
 
@@ -485,6 +547,27 @@ def get_client_secrets_path():
     return path
 
 
+def get_default_save_dest():
+    print("\n── Step 3: Default Save Destination ──────────────────────")
+    print("After each video uploads, the script can automatically move")
+    print("it to a folder on your computer (e.g. an archive or backup).")
+    print("Users can still override this per-video in the GUI.")
+    print()
+    path = input("Default folder to move videos to (leave blank to skip): ").strip()
+    if not path:
+        print("  ↳ No default set — users can still choose per-video in the GUI.")
+        return ""
+    path = os.path.expanduser(path)
+    if not os.path.isdir(path):
+        print(f"\nWARNING: Folder not found at {path}")
+        print("The script will still be generated — make sure the folder")
+        print("exists before running the upload script.")
+        input("\nPress Enter to continue...")
+    else:
+        print(f"  ✓ Default save destination: {path}")
+    return path
+
+
 def check_dependencies():
     print("\n── Step 2: Checking Dependencies ─────────────────────────")
     try:
@@ -499,9 +582,11 @@ def check_dependencies():
         print("✓ Dependencies installed.")
 
 
-def generate_script(client_secrets_path, output_path):
+def generate_script(client_secrets_path, default_save_dest, output_path):
     script_content = UPLOAD_SCRIPT_TEMPLATE.replace(
         "CLIENT_SECRETS_PATH_PLACEHOLDER", client_secrets_path
+    ).replace(
+        "DEFAULT_SAVE_DEST_PLACEHOLDER", default_save_dest
     )
     with open(output_path, "w") as f:
         f.write(script_content)
@@ -517,17 +602,22 @@ def main():
 
     client_secrets_path = get_client_secrets_path()
     check_dependencies()
+    default_save_dest = get_default_save_dest()
 
-    print("\n── Step 3: Output Location ────────────────────────────────")
+    print("\n── Step 4: Output Location ────────────────────────────────")
     default_output = os.path.join(os.getcwd(), "upload_to_youtube.py")
     output = input(f"Save upload script to [{default_output}]: ").strip()
     if not output:
         output = default_output
     output = os.path.expanduser(output)
 
-    generate_script(client_secrets_path, output)
+    generate_script(client_secrets_path, default_save_dest, output)
 
-    print("""
+    save_note = (f"  Default move folder: {default_save_dest}"
+                 if default_save_dest else
+                 "  No default move folder set (choose per-video in the GUI)")
+
+    print(f"""
 ╔══════════════════════════════════════════════════════╗
 ║                    ALL DONE!                         ║
 ╚══════════════════════════════════════════════════════╝
@@ -539,10 +629,12 @@ How to use your generated upload script:
        - Type a description
        - Click Browse to pick a thumbnail
        - Click the Private / Unlisted / Public toggle
+       - Optionally change the save destination
        - Click "Add to Queue" or "Skip"
   4. First run opens a browser to log in to YouTube
   5. Token is saved — no login needed after that
 
+{save_note}
 Supported formats: mp4, mov, avi, mkv, wmv, flv, webm, m4v
 """)
 
